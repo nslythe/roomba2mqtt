@@ -1,4 +1,4 @@
-module github.com/nslythe/roomba2mqtt.git
+module github.com/nslythe/roomba2mqtt
 
 go 1.18
 

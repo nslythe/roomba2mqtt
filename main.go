@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"encoding/json"
 
+	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
 
@@ -36,6 +38,8 @@ var StateMap map[string]string = map[string]string{
 	"home":   "returning",
 	"error":  "error",
 }
+
+var DEBUG bool = false
 
 func (self VacuumClient) Update(msg RoombaMessage) {
 	// Avaibality
@@ -105,14 +109,12 @@ func (self VacuumClient) Update(msg RoombaMessage) {
 
 	// State
 	if msg.State.Reported.CleanMissionStatus.Phase != "" {
-		log.Debug().Str("phase", msg.State.Reported.CleanMissionStatus.Phase).Msg("phase")
-
 		state := VacuumState{
 			State:        StateMap[msg.State.Reported.CleanMissionStatus.Phase],
 			BatteryLevel: msg.State.Reported.BatteryPercent,
 		}
 
-		if attributes["error"] != "" {
+		if val, ok := attributes["error"]; ok && val != "" {
 			state.State = "error"
 		}
 
@@ -143,14 +145,16 @@ func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
 		roombaId = strings.Split(topic, "/")[2]
 	}
 
-	if roombaId != "" {
-		f, err := os.OpenFile(roombaId, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err == nil {
-			defer f.Close()
-			f.WriteString("\n============================\n")
-			f.Write(payload)
-		} else {
-			log.Error().Err(err).Msg("save payload to file")
+	if DEBUG {
+		if roombaId != "" {
+			f, err := os.OpenFile(roombaId, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			if err == nil {
+				defer f.Close()
+				f.WriteString("\n============================\n")
+				f.Write(payload)
+			} else {
+				log.Error().Err(err).Msg("save payload to file")
+			}
 		}
 	}
 
@@ -238,6 +242,20 @@ func (self VacuumClient) CommandHandler(topic string, payload []byte) {
 }
 
 func main() {
+	debug_str := os.Getenv("DEBUG")
+	DEBUG, _ = strconv.ParseBool(debug_str)
+
+	if DEBUG {
+		zerolog.SetGlobalLevel(zerolog.DebugLevel)
+	} else {
+		zerolog.SetGlobalLevel(zerolog.InfoLevel)
+	}
+	zerolog.TimestampFunc = func() time.Time {
+		return time.Now().In(time.Local)
+	}
+
+	log.Info().Msg("Started")
+
 	signal_channel := make(chan os.Signal, 2)
 	stop_channel := make(chan bool, 2)
 	signal.Notify(signal_channel, os.Interrupt, syscall.SIGTERM)
@@ -250,6 +268,8 @@ func main() {
 
 	// configure roomba
 	for i := 0; i < 10; i++ {
+		log.Debug().Int("index", i).Msg("env variable loading")
+
 		client := &VacuumClient{}
 		client.MqttConfig, err = NewMqttConfig(i)
 		if err != nil {
@@ -257,6 +277,7 @@ func main() {
 		}
 		client.HAConfig = ConfigureHomeAssistant(client.MqttConfig.Username)
 		vacuum_client_list = append(vacuum_client_list, client)
+		log.Info().Int("index", i).Msg("env variable loaded")
 	}
 
 	// master mqtt client
@@ -273,25 +294,29 @@ func main() {
 	}
 	master_mqtt_client, err = NewMqttClient(master_mqtt_config)
 	if err != nil {
+		log.Error().Err(err).Msg("master MQTT connection")
 		panic(err)
 	}
 	err = master_mqtt_client.Connect()
 	if err != nil {
+		log.Error().Err(err).Msg("master MQTT connection")
 		panic(err)
 	}
+	log.Info().Msg("master MQTT connected")
 
 	// connect to roomba
 	for i := range vacuum_client_list {
 		vacuum_client_list[i].MqttClient, err = NewMqttClient(vacuum_client_list[i].MqttConfig)
 		if err != nil {
-			log.Error().Err(err).Msg("Roomba connection")
+			log.Error().Err(err).Msg("Roomba MQTT connection")
 		}
 		err = vacuum_client_list[i].Connect()
 		if err != nil {
 			log.Error().Err(err).Msg("Roomba connection")
 		}
-		vacuum_client_list[i].Subscribe("#", vacuum_client_list[i].VacuumHandleMessage)
+		log.Info().Msg("Roomba MQTT connection")
 
+		vacuum_client_list[i].Subscribe("#", vacuum_client_list[i].VacuumHandleMessage)
 		master_mqtt_client.Subscribe(vacuum_client_list[i].HAConfig.Vacuum.CommandTopic, vacuum_client_list[i].CommandHandler)
 	}
 
