@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -40,6 +41,7 @@ var StateMap map[string]string = map[string]string{
 }
 
 var DEBUG bool = false
+var DEBUG_FOLDER = "/debug"
 
 func (self VacuumClient) Update(msg RoombaMessage) {
 	// Avaibality
@@ -145,9 +147,9 @@ func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
 		roombaId = strings.Split(topic, "/")[2]
 	}
 
-	if DEBUG {
+	if _, err := os.Stat(DEBUG_FOLDER); !os.IsNotExist(err) {
 		if roombaId != "" {
-			f, err := os.OpenFile(roombaId, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+			f, err := os.OpenFile(path.Join(DEBUG_FOLDER, roombaId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err == nil {
 				defer f.Close()
 				f.WriteString("\n============================\n")
@@ -244,6 +246,10 @@ func (self VacuumClient) CommandHandler(topic string, payload []byte) {
 func main() {
 	debug_str := os.Getenv("DEBUG")
 	DEBUG, _ = strconv.ParseBool(debug_str)
+	p, found := os.LookupEnv("DEBUG_FOLDER")
+	if found {
+		DEBUG_FOLDER = p
+	}
 
 	if DEBUG {
 		zerolog.SetGlobalLevel(zerolog.DebugLevel)

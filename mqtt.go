@@ -27,21 +27,18 @@ type MqttConfig struct {
 	Password string
 }
 
-type Message struct {
-}
-
 type SubscribeHandleFunction func(topic string, payload []byte)
 
 type MqttClient interface {
 	Connect() error
 	Publish(topic string, payload []byte) error
-	Subscribe(topic string, fnc SubscribeHandleFunction)
+	Subscribe(topic string, fnc SubscribeHandleFunction) error
 }
 
 type MqttClientv5 struct {
 	cm      *autopaho.ConnectionManager
 	cfg     autopaho.ClientConfig
-	fnc_map []SubscribeHandleFunction
+	fnc_map map[string]SubscribeHandleFunction
 }
 
 type MqttClientv4 struct {
@@ -50,7 +47,9 @@ type MqttClientv4 struct {
 }
 
 func (self *MqttClientv5) message_handler(m *paho.Publish) {
-	self.fnc_map[*m.Properties.SubscriptionIdentifier](m.Topic, m.Payload)
+	if _, ok := self.fnc_map[m.Topic]; ok {
+		self.fnc_map[m.Topic](m.Topic, m.Payload)
+	}
 }
 
 func (self *MqttClientv5) Connect() error {
@@ -76,21 +75,29 @@ func (self *MqttClientv5) Publish(topic string, payload []byte) error {
 	return err
 }
 
-func (self *MqttClientv5) Subscribe(topic string, fnc SubscribeHandleFunction) {
-	id := len(self.fnc_map)
-	self.cm.Subscribe(context.Background(),
-		&paho.Subscribe{
-			Properties: &paho.SubscribeProperties{
-				SubscriptionIdentifier: &id,
-			},
-			Subscriptions: map[string]paho.SubscribeOptions{
-				topic: {
-					NoLocal: true,
-				},
+func (self *MqttClientv5) Subscribe(topic string, fnc SubscribeHandleFunction) error {
+	if self.fnc_map == nil {
+		self.fnc_map = map[string]SubscribeHandleFunction{}
+	}
+
+	if _, ok := self.fnc_map[topic]; ok {
+		return errors.New("topic already subscribed")
+	}
+
+	self.fnc_map[topic] = fnc
+
+	sub := paho.Subscribe{
+		Properties: &paho.SubscribeProperties{},
+		Subscriptions: map[string]paho.SubscribeOptions{
+			topic: {
+				NoLocal: true,
 			},
 		},
-	)
-	self.fnc_map = append(self.fnc_map, fnc)
+	}
+
+	self.cm.Subscribe(context.Background(), &sub)
+
+	return nil
 }
 
 func Connect5(config MqttConfig) (*MqttClientv5, error) {
@@ -136,10 +143,11 @@ func (self *MqttClientv4) Publish(topic string, payload []byte) error {
 	return token.Error()
 }
 
-func (self *MqttClientv4) Subscribe(topic string, fnc SubscribeHandleFunction) {
-	self.client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+func (self *MqttClientv4) Subscribe(topic string, fnc SubscribeHandleFunction) error {
+	token := self.client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
 		fnc(msg.Topic(), msg.Payload())
 	})
+	return token.Error()
 }
 
 func Connect34(config MqttConfig) (*MqttClientv4, error) {
