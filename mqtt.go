@@ -31,7 +31,7 @@ type SubscribeHandleFunction func(topic string, payload []byte)
 
 type MqttClient interface {
 	Connect() error
-	Publish(topic string, payload []byte) error
+	Publish(topic string, payload []byte, retain bool) error
 	Subscribe(topic string, fnc SubscribeHandleFunction) error
 }
 
@@ -67,10 +67,11 @@ func (self *MqttClientv5) Connect() error {
 	return nil
 }
 
-func (self *MqttClientv5) Publish(topic string, payload []byte) error {
+func (self *MqttClientv5) Publish(topic string, payload []byte, retain bool) error {
 	_, err := self.cm.Publish(context.Background(), &paho.Publish{
 		Topic:   topic,
 		Payload: payload,
+		Retain:  retain,
 	})
 	return err
 }
@@ -138,8 +139,8 @@ func (self *MqttClientv4) Connect() error {
 	return nil
 }
 
-func (self *MqttClientv4) Publish(topic string, payload []byte) error {
-	token := self.client.Publish(topic, 0, false, payload)
+func (self *MqttClientv4) Publish(topic string, payload []byte, retain bool) error {
+	token := self.client.Publish(topic, 0, retain, payload)
 	return token.Error()
 }
 
@@ -163,6 +164,7 @@ func Connect34(config MqttConfig) (*MqttClientv4, error) {
 	return_value.opts.SetUsername(config.Username)
 	return_value.opts.SetPassword(config.Password)
 	return_value.opts.SetProtocolVersion(uint(config.Version))
+	return_value.opts.SetAutoReconnect(true)
 
 	if config.Port == 8883 {
 		tlsConfig := tls.Config{}

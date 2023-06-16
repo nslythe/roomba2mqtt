@@ -22,6 +22,15 @@ type VacuumClient struct {
 	MqttConfig
 	MqttClient
 	HAConfig
+	last_roomba_message  RoombaMessage
+	attributes           *map[string]interface{}
+	state                *VacuumState
+	NeedUpdateConfig     bool
+	NeedUpdateAttributes bool
+	NeedUpdateState      bool
+	available            bool
+	ConnectionChannel    chan MqttClient
+	SubscribeChannel     chan bool
 }
 
 var vacuum_client_list []*VacuumClient
@@ -31,105 +40,142 @@ var master_mqtt_client MqttClient
 
 var master_mqtt_topic string = "vacuum"
 
+const (
+	cleaning_state  string = "cleaning"
+	docked_state           = "docked"
+	paused_state           = "paused"
+	idle_state             = "idle"
+	returning_state        = "returning"
+	error_state            = "error"
+)
+
 var StateMap map[string]string = map[string]string{
-	"run":    "cleaning",
-	"charge": "docked",
-	"pause":  "paused",
-	"stop":   "idle",
-	"home":   "returning",
-	"error":  "error",
+	"run":       cleaning_state,
+	"pause":     paused_state,
+	"stop":      idle_state,
+	"hmUsrDock": returning_state,
+	"charge":    docked_state,
+	"evac":      docked_state,
+	"hmPostMsn": docked_state,
+	"stuck":     error_state,
 }
 
 var DEBUG bool = false
 var DEBUG_FOLDER = "/debug"
 
-func (self VacuumClient) Update(msg RoombaMessage) {
-	// Avaibality
-	available := true
+func (self *VacuumClient) UpdateRoombaMessage(msg RoombaMessage) {
+	// Config
+	if msg.State.Reported.Name != nil {
+		self.HAConfig.Vacuum.Name = *msg.State.Reported.Name
+		self.HAConfig.Vacuum.Device.Name = *msg.State.Reported.Name
+		self.NeedUpdateConfig = true
+	}
+
+	if msg.State.Reported.SKU != nil {
+		self.HAConfig.Vacuum.Device.Model = *msg.State.Reported.SKU
+		self.NeedUpdateConfig = true
+	}
+
+	if msg.State.Reported.SoftwareVer != nil {
+		self.HAConfig.Vacuum.Device.SwVersion = *msg.State.Reported.SoftwareVer
+		self.NeedUpdateConfig = true
+	}
+
+	// Attrivbute
+	(*self.attributes)["id"] = self.RoombaId
+	(*self.attributes)["address"] = self.MqttConfig.Broker
+	if msg.State.Reported.Bin != nil {
+		(*self.attributes)["bin_present"] = msg.State.Reported.Bin.Present
+		if !msg.State.Reported.Bin.Present {
+			(*self.attributes)["error"] = "Bin is absent"
+		}
+		(*self.attributes)["bin_full"] = msg.State.Reported.Bin.Full
+		self.NeedUpdateAttributes = true
+	}
+	if msg.State.Reported.TankLvl != nil {
+		(*self.attributes)["tank_level"] = msg.State.Reported.TankLvl
+		if *msg.State.Reported.TankLvl == 0 {
+			(*self.attributes)["error"] = "Tank is empty"
+		}
+		self.NeedUpdateAttributes = true
+	}
+	if msg.State.Reported.LidOpen != nil {
+		(*self.attributes)["lid_open"] = msg.State.Reported.LidOpen
+		if *msg.State.Reported.LidOpen {
+			(*self.attributes)["error"] = "Lid is open"
+		}
+		self.NeedUpdateAttributes = true
+	}
+	if msg.State.Reported.TankPresent != nil {
+		(*self.attributes)["tank_present"] = msg.State.Reported.TankPresent
+		if !*msg.State.Reported.TankPresent {
+			(*self.attributes)["error"] = "Tank is absent"
+		}
+		self.NeedUpdateAttributes = true
+	}
+	if msg.State.Reported.DetectedPad != nil {
+		(*self.attributes)["pad"] = msg.State.Reported.DetectedPad
+		if *msg.State.Reported.DetectedPad == "invalid" {
+			(*self.attributes)["error"] = "Pad invalid"
+		}
+		self.NeedUpdateAttributes = true
+	}
+
+	// State
+	if msg.State.Reported.CleanMissionStatus != nil {
+		self.state.State = StateMap[msg.State.Reported.CleanMissionStatus.Phase]
+		self.NeedUpdateState = true
+		if msg.State.Reported.CleanMissionStatus.Phase == "stuck" {
+			(*self.attributes)["error"] = "Stuck"
+		}
+	}
+	if msg.State.Reported.BatteryPercent != nil {
+		self.state.BatteryLevel = *msg.State.Reported.BatteryPercent
+		self.NeedUpdateState = true
+	}
+	if val, ok := (*self.attributes)["error"]; ok && val != "" {
+		self.state.State = "error"
+		self.NeedUpdateState = true
+	}
+
+	self.last_roomba_message = msg
+}
+
+func (self VacuumClient) HandleRoombaMessage(msg RoombaMessage) {
+	self.UpdateRoombaMessage(msg)
+	self.available = true
 
 	// Config
-	if msg.State.Reported.Name != "" {
-		updated_config := false
-
-		if self.HAConfig.Vacuum.Name != msg.State.Reported.Name {
-			self.HAConfig.Vacuum.Name = msg.State.Reported.Name
-			self.HAConfig.Vacuum.Device.Name = msg.State.Reported.Name
-			updated_config = true
-		}
-		if self.HAConfig.Vacuum.Device.Model != msg.State.Reported.SKU {
-			self.HAConfig.Vacuum.Device.Model = msg.State.Reported.SKU
-			updated_config = true
-		}
-		if self.HAConfig.Vacuum.Device.SwVersion != msg.State.Reported.SoftwareVer {
-			self.HAConfig.Vacuum.Device.SwVersion = msg.State.Reported.SoftwareVer
-			updated_config = true
-		}
-		if updated_config {
-			self.SendConfig()
-		}
+	if self.NeedUpdateConfig {
+		self.SendConfig()
 	}
 
 	// Attributes
-	var attributes map[string]interface{} = make(map[string]interface{})
-	if msg.State.Reported.Bin != nil {
-		attributes["bin_present"] = msg.State.Reported.Bin.Present
-		if !msg.State.Reported.Bin.Present {
-			attributes["error"] = "Bin is absent"
-		}
-		attributes["bin_full"] = msg.State.Reported.Bin.Full
-		if msg.State.Reported.Bin.Full {
-			attributes["error"] = "Bin is full"
-		}
+	if self.NeedUpdateAttributes {
+		self.SendAttributes()
 	}
-	if msg.State.Reported.TankLvl != nil {
-		attributes["tank_level"] = msg.State.Reported.TankLvl
-		if *msg.State.Reported.TankLvl == 0 {
-			attributes["error"] = "Tank is empty"
-		}
-	}
-	if msg.State.Reported.LidOpen != nil {
-		attributes["lid_open"] = msg.State.Reported.LidOpen
-		if *msg.State.Reported.LidOpen {
-			attributes["error"] = "Lid is open"
-		}
-	}
-	if msg.State.Reported.TankPresent != nil {
-		attributes["tank_present"] = msg.State.Reported.TankPresent
-		if !*msg.State.Reported.TankPresent {
-			attributes["error"] = "Tank is absent"
-		}
-	}
-	if msg.State.Reported.DetectedPad != nil {
-		attributes["pad"] = msg.State.Reported.DetectedPad
-		if *msg.State.Reported.DetectedPad == "invalid" {
-			attributes["error"] = "Pad invalid"
-		}
-	}
-
-	data, _ := json.Marshal(attributes)
-	master_mqtt_client.Publish(self.HAConfig.Vacuum.JsonAttributesTopic, data)
 
 	// State
-	if msg.State.Reported.CleanMissionStatus.Phase != "" {
-		state := VacuumState{
-			State:        StateMap[msg.State.Reported.CleanMissionStatus.Phase],
-			BatteryLevel: msg.State.Reported.BatteryPercent,
-		}
-
-		if val, ok := attributes["error"]; ok && val != "" {
-			state.State = "error"
-		}
-
-		data, _ := json.Marshal(state)
-		master_mqtt_client.Publish(self.HAConfig.Vacuum.StateTopic, data)
+	if self.NeedUpdateState {
+		self.SendState()
 	}
 
-	if available {
-		master_mqtt_client.Publish(self.HAConfig.Vacuum.AvailabilityTopic, []byte("online"))
+	if self.available {
+		master_mqtt_client.Publish(self.HAConfig.Vacuum.AvailabilityTopic, []byte("online"), false)
 	} else {
-		master_mqtt_client.Publish(self.HAConfig.Vacuum.AvailabilityTopic, []byte("offline"))
+		master_mqtt_client.Publish(self.HAConfig.Vacuum.AvailabilityTopic, []byte("offline"), false)
 	}
+}
 
+func (self *VacuumClient) SendState() {
+	data, _ := json.Marshal(self.state)
+	master_mqtt_client.Publish(self.HAConfig.Vacuum.StateTopic, data, false)
+}
+
+func (self *VacuumClient) SendAttributes() {
+	data, _ := json.Marshal(self.attributes)
+	master_mqtt_client.Publish(self.HAConfig.Vacuum.JsonAttributesTopic, data, false)
+	self.NeedUpdateAttributes = false
 }
 
 func (self *VacuumClient) SendConfig() {
@@ -138,7 +184,8 @@ func (self *VacuumClient) SendConfig() {
 		panic(err)
 	}
 
-	master_mqtt_client.Publish(self.ConfigTopic, data)
+	master_mqtt_client.Publish(self.ConfigTopic, data, true)
+	self.NeedUpdateConfig = false
 }
 
 func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
@@ -152,8 +199,10 @@ func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
 			f, err := os.OpenFile(path.Join(DEBUG_FOLDER, roombaId), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 			if err == nil {
 				defer f.Close()
-				f.WriteString("\n============================\n")
+				f.WriteString(topic)
+				f.WriteString("      ")
 				f.Write(payload)
+				f.WriteString("\n")
 			} else {
 				log.Error().Err(err).Msg("save payload to file")
 			}
@@ -167,7 +216,7 @@ func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
 		if err != nil {
 			log.Error().Err(err).Msg("Message received from roomba")
 		} else {
-			self.Update(msg)
+			self.HandleRoombaMessage(msg)
 		}
 
 		dst_topic := topic
@@ -175,7 +224,7 @@ func (self VacuumClient) VacuumHandleMessage(topic string, payload []byte) {
 			dst_topic = fmt.Sprintf("$aws/things/%s/%s", self.RoombaId, dst_topic)
 		}
 		dst_topic = master_mqtt_topic + dst_topic
-		master_mqtt_client.Publish(dst_topic, payload)
+		master_mqtt_client.Publish(dst_topic, payload, false)
 		log.Info().Str("broker", self.Broker).Str("dst_topic", dst_topic).Msg("mapping message")
 	}
 }
@@ -218,7 +267,11 @@ func (self VacuumClient) CommandHandler(topic string, payload []byte) {
 		Initiator: "localApp",
 	}
 	if command_requested == "start" {
-		cmd.Command = "start"
+		if self.state.State == paused_state {
+			cmd.Command = "resume"
+		} else {
+			cmd.Command = "start"
+		}
 	}
 	if command_requested == "stop" {
 		cmd.Command = "stop"
@@ -227,6 +280,12 @@ func (self VacuumClient) CommandHandler(topic string, payload []byte) {
 		cmd.Command = "pause"
 	}
 	if command_requested == "return_to_base" {
+		if self.state.State == cleaning_state {
+			cmd.Command = "stop"
+			data, _ := json.Marshal(cmd)
+			self.Publish("cmd", data, false)
+			time.Sleep(5 * time.Second)
+		}
 		cmd.Command = "dock"
 	}
 	if command_requested == "locate" {
@@ -239,8 +298,7 @@ func (self VacuumClient) CommandHandler(topic string, payload []byte) {
 	}
 
 	data, _ := json.Marshal(cmd)
-
-	self.Publish("cmd", data)
+	self.Publish("cmd", data, false)
 }
 
 func main() {
@@ -276,7 +334,12 @@ func main() {
 	for i := 0; i < 10; i++ {
 		log.Debug().Int("index", i).Msg("env variable loading")
 
-		client := &VacuumClient{}
+		client := &VacuumClient{
+			ConnectionChannel: make(chan MqttClient),
+			SubscribeChannel:  make(chan bool),
+			state:             &VacuumState{},
+			attributes:        &map[string]interface{}{},
+		}
 		client.MqttConfig, err = NewMqttConfig(i)
 		if err != nil {
 			break
@@ -312,19 +375,66 @@ func main() {
 
 	// connect to roomba
 	for i := range vacuum_client_list {
-		vacuum_client_list[i].MqttClient, err = NewMqttClient(vacuum_client_list[i].MqttConfig)
-		if err != nil {
-			log.Error().Err(err).Msg("Roomba MQTT connection")
-		}
-		err = vacuum_client_list[i].Connect()
-		if err != nil {
-			log.Error().Err(err).Msg("Roomba connection")
-		}
-		log.Info().Msg("Roomba MQTT connection")
+		go ConnectToRoomba(vacuum_client_list[i].MqttConfig, vacuum_client_list[i].ConnectionChannel)
+	}
 
-		vacuum_client_list[i].Subscribe("#", vacuum_client_list[i].VacuumHandleMessage)
-		master_mqtt_client.Subscribe(vacuum_client_list[i].HAConfig.Vacuum.CommandTopic, vacuum_client_list[i].CommandHandler)
+	// Subscribe to roomba
+	for i := range vacuum_client_list {
+		go SubscribeToRoomba(vacuum_client_list[i], vacuum_client_list[i].SubscribeChannel)
+	}
+
+	// wait for ready
+	for i := range vacuum_client_list {
+		<-vacuum_client_list[i].SubscribeChannel
 	}
 
 	<-stop_channel
+}
+
+func SubscribeToRoomba(client *VacuumClient, subscribe_channel chan bool) {
+	mqtt_client := <-client.ConnectionChannel
+	client.MqttClient = mqtt_client
+
+	client.Subscribe("#", client.VacuumHandleMessage)
+	master_mqtt_client.Subscribe(client.HAConfig.Vacuum.CommandTopic, client.CommandHandler)
+
+	subscribe_channel <- true
+}
+
+func ConnectToRoomba(config MqttConfig, connection_channel chan MqttClient) {
+	timing := []time.Duration{
+		10 * time.Second,
+		30 * time.Second,
+		1 * time.Minute,
+		5 * time.Minute,
+		10 * time.Minute,
+	}
+	timing_idx := 0
+	for {
+		log.Info().Str("address", config.Broker).Msg("Roomba MQTT connect")
+
+		wait_time := timing[timing_idx]
+		timing_idx++
+		if timing_idx >= len(timing) {
+			timing_idx = timing_idx - 1
+		}
+
+		client, err := NewMqttClient(config)
+		if err != nil {
+			log.Error().Err(err).Str("wait_time", wait_time.String()).Msg("Roomba MQTT connection")
+			time.Sleep(wait_time)
+			continue
+		}
+		err = client.Connect()
+		if err != nil {
+			log.Error().Err(err).Str("wait_time", wait_time.String()).Msg("Roomba MQTT connection")
+			time.Sleep(wait_time)
+			continue
+		}
+
+		log.Info().Msg("Roomba MQTT connected")
+
+		connection_channel <- client
+		return
+	}
 }
