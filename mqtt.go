@@ -31,8 +31,9 @@ type SubscribeHandleFunction func(topic string, payload []byte)
 
 type MqttClient interface {
 	Connect() error
-	Publish(topic string, payload []byte, retain bool) error
+	Publish(topic string, payload []byte, qos uint8, retain bool) error
 	Subscribe(topic string, fnc SubscribeHandleFunction) error
+	Delete(topic string)
 }
 
 type MqttClientv5 struct {
@@ -44,6 +45,10 @@ type MqttClientv5 struct {
 type MqttClientv4 struct {
 	client mqtt.Client
 	opts   *mqtt.ClientOptions
+}
+
+func (self *MqttClientv5) Delete(topic string) {
+	self.Delete(topic)
 }
 
 func (self *MqttClientv5) message_handler(m *paho.Publish) {
@@ -67,11 +72,12 @@ func (self *MqttClientv5) Connect() error {
 	return nil
 }
 
-func (self *MqttClientv5) Publish(topic string, payload []byte, retain bool) error {
+func (self *MqttClientv5) Publish(topic string, payload []byte, qos uint8, retain bool) error {
 	_, err := self.cm.Publish(context.Background(), &paho.Publish{
 		Topic:   topic,
 		Payload: payload,
 		Retain:  retain,
+		QoS:     qos,
 	})
 	return err
 }
@@ -139,8 +145,12 @@ func (self *MqttClientv4) Connect() error {
 	return nil
 }
 
-func (self *MqttClientv4) Publish(topic string, payload []byte, retain bool) error {
-	token := self.client.Publish(topic, 0, retain, payload)
+func (self *MqttClientv4) Delete(topic string) {
+	self.Delete(topic)
+}
+
+func (self *MqttClientv4) Publish(topic string, payload []byte, qos uint8, retain bool) error {
+	token := self.client.Publish(topic, qos, retain, payload)
 	return token.Error()
 }
 
