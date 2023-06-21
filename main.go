@@ -21,27 +21,23 @@ import (
 type Region struct {
 	Id   string
 	Name string
+	Type string
 }
 
 type Map struct {
-	Name  string
-	Id    string
-	Rooms map[string]Region
-	Zones map[string]Region
+	Name    string
+	Id      string
+	Regions map[string]*Region
 }
 
 type Client struct {
 	Version  int
 	RoombaId string
 	MqttConfig
-	MqttClient `json:"-"`
 	HomeAssistant
-	NeedUpdateConfig     bool
-	NeedUpdateAttributes bool
-	NeedUpdateState      bool
-	ConnectionChannel    chan MqttClient `json:"-"`
-	SubscribeChannel     chan bool       `json:"-"`
-	Maps                 []*Map
+	ConnectionChannel chan MqttClient `json:"-"`
+	SubscribeChannel  chan bool       `json:"-"`
+	Maps              []*Map
 }
 
 var vacuum_client_list []*Client
@@ -71,18 +67,28 @@ var StateMap map[string]string = map[string]string{
 	"stuck":     error_state,
 }
 
-type Command struct {
-	Command   string `json:"command"`
-	Time      int    `json:"time"`
-	Initiator string `json:"initiator"`
-}
-
-var VERSION = 2
 var DEBUG bool = false
 var DEBUG_FOLDER = "/debug"
 var DATA_FOLDER = "/data"
 
 func (self *Client) UpdateRoombaMessage(msg RoombaMessage) {
+	// Config Vacuum
+	if msg.State.Reported.Name != nil {
+		self.HomeAssistant.Vacuum.Config.Name = *msg.State.Reported.Name
+		self.HomeAssistant.Vacuum.Config.Device.Name = *msg.State.Reported.Name
+		self.Vacuum.NeedSendConfig = true
+	}
+
+	if msg.State.Reported.SKU != nil {
+		self.HomeAssistant.Vacuum.Config.Device.Model = *msg.State.Reported.SKU
+		self.Vacuum.NeedSendConfig = true
+	}
+
+	if msg.State.Reported.SoftwareVer != nil {
+		self.HomeAssistant.Vacuum.Config.Device.SwVersion = *msg.State.Reported.SoftwareVer
+		self.Vacuum.NeedSendConfig = true
+	}
+
 	// Map & region
 	if msg.State.Reported.Maps != nil {
 		for i := range *msg.State.Reported.Maps {
@@ -103,16 +109,16 @@ func (self *Client) UpdateRoombaMessage(msg RoombaMessage) {
 				}
 				if current_map == nil {
 					current_map = &Map{
-						Id:    map_id,
-						Name:  map_name,
-						Rooms: make(map[string]Region),
-						Zones: make(map[string]Region),
+						Id:      map_id,
+						Name:    map_name,
+						Regions: make(map[string]*Region),
 					}
 					self.Maps = append(self.Maps, current_map)
 				}
 			}
 		}
 	}
+
 	// Region
 	if msg.State.Reported.LastCommand != nil {
 		map_id := msg.State.Reported.LastCommand.PmapId
@@ -127,47 +133,38 @@ func (self *Client) UpdateRoombaMessage(msg RoombaMessage) {
 			if curren_map != nil {
 				for r := range msg.State.Reported.LastCommand.Regions {
 					region := msg.State.Reported.LastCommand.Regions[r]
-					if region.Type == "rid" {
-						curren_map.Rooms[region.RegionId] = Region{
-							Id: region.RegionId,
-						}
-					}
-					if region.Type == "zid" {
-						curren_map.Zones[region.RegionId] = Region{
-							Id: region.RegionId,
-						}
+					curren_map.Regions[region.RegionId] = &Region{
+						Id:   region.RegionId,
+						Type: region.Type,
 					}
 				}
 			}
 		}
 	}
 
+	//Create switch for each zone
 	for m := range self.Maps {
-		for r := range self.Maps[m].Rooms {
-			self.HomeAssistant.ConfigureSwitch(self.RoombaId, "r"+self.Maps[m].Rooms[r].Id, self.Vacuum.Config.Device)
-			self.NeedUpdateConfig = true
+		for r := range self.Maps[m].Regions {
+			found := false
+			for i := range self.HomeAssistant.RegionSwitches {
+				if self.HomeAssistant.RegionSwitches[i].Region == self.Maps[m].Regions[r] {
+					found = true
+					break
+				}
+			}
+			if !found {
+				icon := "mdi:texture-box"
+				if self.Maps[m].Regions[r].Type == "zid" {
+					icon = "mdi:texture"
+				}
+				s := self.HomeAssistant.ConfigureRoombaRegionSwitch(self.RoombaId,
+					self.Maps[m].Regions[r].Type+self.Maps[m].Regions[r].Id,
+					self.Vacuum.Config.Device,
+					icon)
+				s.Region = self.Maps[m].Regions[r]
+				s.Map = self.Maps[m]
+			}
 		}
-		for r := range self.Maps[m].Zones {
-			self.HomeAssistant.ConfigureSwitch(self.RoombaId, "z"+self.Maps[m].Rooms[r].Id, self.Vacuum.Config.Device)
-			self.NeedUpdateConfig = true
-		}
-	}
-
-	// Config Vacuum
-	if msg.State.Reported.Name != nil {
-		self.HomeAssistant.Vacuum.Config.Name = *msg.State.Reported.Name
-		self.HomeAssistant.Vacuum.Config.Device.Name = *msg.State.Reported.Name
-		self.NeedUpdateConfig = true
-	}
-
-	if msg.State.Reported.SKU != nil {
-		self.HomeAssistant.Vacuum.Config.Device.Model = *msg.State.Reported.SKU
-		self.NeedUpdateConfig = true
-	}
-
-	if msg.State.Reported.SoftwareVer != nil {
-		self.HomeAssistant.Vacuum.Config.Device.SwVersion = *msg.State.Reported.SoftwareVer
-		self.NeedUpdateConfig = true
 	}
 
 	// Attrivbute
@@ -179,15 +176,12 @@ func (self *Client) UpdateRoombaMessage(msg RoombaMessage) {
 		i := 0
 		for m := range self.Maps {
 			self.Vacuum.Attributes["map "+strconv.Itoa(i)] = self.Maps[m].Id
-			for r := range self.Maps[m].Rooms {
-				self.Vacuum.Attributes["map_"+strconv.Itoa(i)+"_room_"+r] = self.Maps[m].Rooms[r].Id
-			}
-			for r := range self.Maps[m].Zones {
-				self.Vacuum.Attributes["map_"+strconv.Itoa(i)+"_zone_"+r] = self.Maps[m].Zones[r].Id
+			for r := range self.Maps[m].Regions {
+				self.Vacuum.Attributes["map_"+strconv.Itoa(i)+"_room_"+r] = self.Maps[m].Regions[r].Id
 			}
 			i++
 		}
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 
 	if msg.State.Reported.Bin != nil {
@@ -196,119 +190,52 @@ func (self *Client) UpdateRoombaMessage(msg RoombaMessage) {
 			self.Vacuum.Attributes["error"] = "Bin is absent"
 		}
 		self.Vacuum.Attributes["bin_full"] = msg.State.Reported.Bin.Full
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 	if msg.State.Reported.TankLvl != nil {
 		self.Vacuum.Attributes["tank_level"] = msg.State.Reported.TankLvl
 		if *msg.State.Reported.TankLvl == 0 {
 			self.Vacuum.Attributes["error"] = "Tank is empty"
 		}
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 	if msg.State.Reported.LidOpen != nil {
 		self.Vacuum.Attributes["lid_open"] = msg.State.Reported.LidOpen
 		if *msg.State.Reported.LidOpen {
 			self.Vacuum.Attributes["error"] = "Lid is open"
 		}
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 	if msg.State.Reported.TankPresent != nil {
 		self.Vacuum.Attributes["tank_present"] = msg.State.Reported.TankPresent
 		if !*msg.State.Reported.TankPresent {
 			self.Vacuum.Attributes["error"] = "Tank is absent"
 		}
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 	if msg.State.Reported.DetectedPad != nil {
 		self.Vacuum.Attributes["pad"] = msg.State.Reported.DetectedPad
 		if *msg.State.Reported.DetectedPad == "invalid" {
 			self.Vacuum.Attributes["error"] = "Pad invalid"
 		}
-		self.NeedUpdateAttributes = true
+		self.Vacuum.NeedSendAttributes = true
 	}
 
 	// State
 	if msg.State.Reported.CleanMissionStatus != nil {
 		self.Vacuum.State.State = StateMap[msg.State.Reported.CleanMissionStatus.Phase]
-		self.NeedUpdateState = true
+		self.Vacuum.NeedSendState = true
 		if msg.State.Reported.CleanMissionStatus.Phase == "stuck" {
 			self.Vacuum.Attributes["error"] = "Stuck"
 		}
 	}
 	if msg.State.Reported.BatteryPercent != nil {
 		self.Vacuum.State.BatteryLevel = *msg.State.Reported.BatteryPercent
-		self.NeedUpdateState = true
+		self.Vacuum.NeedSendState = true
 	}
 	if val, ok := self.Vacuum.Attributes["error"]; ok && val != "" {
 		self.Vacuum.State.State = "error"
-		self.NeedUpdateState = true
-	}
-}
-
-func (self *Client) HandleRoombaMessage(msg RoombaMessage) {
-	self.UpdateRoombaMessage(msg)
-
-	self.Save(DATA_FOLDER)
-
-	// Config
-	if self.NeedUpdateConfig {
-		self.HomeAssistant.SendConfig()
-		self.NeedUpdateConfig = false
-	}
-
-	// Attributes
-	if self.NeedUpdateAttributes {
-		self.SendAttributes()
-		self.NeedUpdateAttributes = false
-	}
-
-	// State
-	if self.NeedUpdateState {
-		self.HomeAssistant.SendState()
-		self.NeedUpdateState = false
-	}
-
-	self.HomeAssistant.SendAvaibality()
-}
-
-func (self *Client) Save(data_dir string) string {
-	self.Version = VERSION
-	file_name := path.Join(data_dir, self.RoombaId+".json")
-
-	log.Info().Str("file_name", file_name).Msg("Saving vacuum")
-
-	os.MkdirAll(data_dir, 0755)
-
-	data, err := json.Marshal(self)
-	if err != nil {
-		log.Error().Err(err).Msg("Saving vacuum")
-	} else {
-		err = ioutil.WriteFile(file_name, data, 0644)
-		if err != nil {
-			log.Error().Err(err).Msg("Saving vacuum")
-		}
-		return file_name
-	}
-	return ""
-}
-
-func (self *Client) Load(data_dir string) {
-	file_name := path.Join(data_dir, self.RoombaId+".json")
-
-	log.Info().Str("file_name", file_name).Msg("Loading vacuum")
-
-	data, err := ioutil.ReadFile(file_name)
-	if err != nil {
-		log.Error().Err(err).Msg("Saving vacuum")
-	} else {
-		tmp := Client{}
-		json.Unmarshal(data, &tmp)
-		if tmp.Version != VERSION {
-			log.Warn().Msg("Bad version")
-			os.Remove(file_name)
-		} else {
-			json.Unmarshal(data, self)
-		}
+		self.Vacuum.NeedSendState = true
 	}
 }
 
@@ -337,13 +264,26 @@ func (self *Client) VacuumHandleMessage(topic string, payload []byte) {
 		if self.RoombaId == "" {
 			self.RoombaId = roombaId
 			self.Load(DATA_FOLDER)
+			if DEBUG {
+				self.HomeAssistant.ConfigureCleanPassSelect(self.RoombaId,
+					"clean_pass",
+					self.Vacuum.Config.Device,
+					"mdi:spray-bottle",
+					[]string{
+						"One",
+						"Two",
+					})
+
+			}
 		}
 		msg := RoombaMessage{}
 		err := json.Unmarshal(payload, &msg)
 		if err != nil {
 			log.Error().Err(err).Msg("Message received from roomba")
 		} else {
-			self.HandleRoombaMessage(msg)
+			self.UpdateRoombaMessage(msg)
+			self.Save(DATA_FOLDER)
+			self.HomeAssistant.SendUpdate()
 		}
 
 		dst_topic := topic
@@ -353,8 +293,40 @@ func (self *Client) VacuumHandleMessage(topic string, payload []byte) {
 	}
 }
 
-func NewMqttConfig(id int) (MqttConfig, error) {
+func (self *Client) Save(data_dir string) string {
+	file_name := path.Join(data_dir, self.RoombaId+".json")
 
+	log.Info().Str("file_name", file_name).Msg("Saving vacuum")
+
+	os.MkdirAll(data_dir, 0755)
+
+	data, err := json.Marshal(self.Maps)
+	if err != nil {
+		log.Error().Err(err).Msg("Saving vacuum")
+	} else {
+		err = ioutil.WriteFile(file_name, data, 0644)
+		if err != nil {
+			log.Error().Err(err).Msg("Saving vacuum")
+		}
+		return file_name
+	}
+	return ""
+}
+
+func (self *Client) Load(data_dir string) {
+	file_name := path.Join(data_dir, self.RoombaId+".json")
+
+	log.Info().Str("file_name", file_name).Msg("Loading vacuum")
+
+	data, err := ioutil.ReadFile(file_name)
+	if err != nil {
+		log.Error().Err(err).Msg("Saving vacuum")
+	} else {
+		json.Unmarshal(data, &self.Maps)
+	}
+}
+
+func NewMqttConfig(id int) (MqttConfig, error) {
 	ROOMBA_ADDRESS := fmt.Sprintf("%d_ROOMBA_ADDRESS", id)
 	ROOMBA_USER := fmt.Sprintf("%d_ROOMBA_USER", id)
 	ROOMBA_PASSWORD := fmt.Sprintf("%d_ROOMBA_PASSWORD", id)
@@ -376,47 +348,6 @@ func NewMqttConfig(id int) (MqttConfig, error) {
 		Password: os.Getenv(ROOMBA_PASSWORD),
 		Version:  0,
 	}, nil
-}
-
-func (self *Client) CommandHandler(topic string, payload []byte) {
-	command_requested := string(payload)
-	cmd := Command{
-		Time:      0,
-		Initiator: "localApp",
-	}
-	if command_requested == "start" {
-		if self.Vacuum.State.State == paused_state {
-			cmd.Command = "resume"
-		} else {
-			cmd.Command = "start"
-		}
-	}
-	if command_requested == "stop" {
-		cmd.Command = "stop"
-	}
-	if command_requested == "pause" {
-		cmd.Command = "pause"
-	}
-	if command_requested == "return_to_base" {
-		if self.Vacuum.State.State == cleaning_state {
-			cmd.Command = "stop"
-			data, _ := json.Marshal(cmd)
-			self.Publish("cmd", data, 2, false)
-			time.Sleep(5 * time.Second)
-		}
-		cmd.Command = "dock"
-	}
-	if command_requested == "locate" {
-		log.Warn().Msg("locate")
-		return
-	}
-	if command_requested == "clean_spot" {
-		log.Warn().Msg("clean_spot")
-		return
-	}
-
-	data, _ := json.Marshal(cmd)
-	self.Publish("cmd", data, 0, false)
 }
 
 func main() {
@@ -453,26 +384,6 @@ func main() {
 
 	var err error
 
-	// configure roomba
-	for i := 0; i < 10; i++ {
-		log.Debug().Int("index", i).Msg("env variable loading")
-
-		client := &Client{
-			ConnectionChannel: make(chan MqttClient),
-			SubscribeChannel:  make(chan bool),
-			Maps:              []*Map{},
-		}
-		client.MqttConfig, err = NewMqttConfig(i)
-		if err != nil {
-			break
-		}
-		client.HomeAssistant = ConfigureHomeAssistant(master_mqtt_topic)
-		client.HomeAssistant.ConfigureVacuum(client.MqttConfig.Username)
-
-		vacuum_client_list = append(vacuum_client_list, client)
-		log.Info().Int("index", i).Msg("env variable loaded")
-	}
-
 	// master mqtt client
 	port, _ := strconv.Atoi(os.Getenv("MQTT_PORT"))
 	if port == 0 {
@@ -497,6 +408,26 @@ func main() {
 	}
 	log.Info().Msg("master MQTT connected")
 
+	// configure roomba
+	for i := 0; i < 10; i++ {
+		log.Debug().Int("index", i).Msg("env variable loading")
+
+		client := &Client{
+			ConnectionChannel: make(chan MqttClient),
+			SubscribeChannel:  make(chan bool),
+			Maps:              []*Map{},
+		}
+		client.MqttConfig, err = NewMqttConfig(i)
+		if err != nil {
+			break
+		}
+		client.HomeAssistant = ConfigureHomeAssistant(master_mqtt_topic, master_mqtt_client)
+		client.HomeAssistant.ConfigureVacuum(client.MqttConfig.Username)
+
+		vacuum_client_list = append(vacuum_client_list, client)
+		log.Info().Int("index", i).Msg("env variable loaded")
+	}
+
 	// connect to roomba
 	for i := range vacuum_client_list {
 		go ConnectToRoomba(vacuum_client_list[i].MqttConfig, vacuum_client_list[i].ConnectionChannel)
@@ -517,11 +448,12 @@ func main() {
 
 func SubscribeToRoomba(client *Client, subscribe_channel chan bool) {
 	mqtt_client := <-client.ConnectionChannel
-	client.MqttClient = mqtt_client
 
-	client.Subscribe("#", client.VacuumHandleMessage)
+	client.Vacuum.HomeAssistant.MqttClient = mqtt_client
 
-	master_mqtt_client.Subscribe(client.HomeAssistant.Vacuum.Config.CommandTopic, client.CommandHandler)
+	client.Vacuum.HomeAssistant.MqttClient.Subscribe("#", client.VacuumHandleMessage)
+
+	master_mqtt_client.Subscribe(client.HomeAssistant.Vacuum.Config.CommandTopic, client.Vacuum.CommandHandler)
 
 	subscribe_channel <- true
 }

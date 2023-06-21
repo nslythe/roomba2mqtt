@@ -33,7 +33,6 @@ type MqttClient interface {
 	Connect() error
 	Publish(topic string, payload []byte, qos uint8, retain bool) error
 	Subscribe(topic string, fnc SubscribeHandleFunction) error
-	Delete(topic string)
 }
 
 type MqttClientv5 struct {
@@ -45,10 +44,6 @@ type MqttClientv5 struct {
 type MqttClientv4 struct {
 	client mqtt.Client
 	opts   *mqtt.ClientOptions
-}
-
-func (self *MqttClientv5) Delete(topic string) {
-	self.Delete(topic)
 }
 
 func (self *MqttClientv5) message_handler(m *paho.Publish) {
@@ -131,6 +126,7 @@ func Connect5(config MqttConfig) (*MqttClientv5, error) {
 			InsecureSkipVerify: true,
 		},
 	}
+
 	return return_value, nil
 }
 
@@ -143,10 +139,6 @@ func (self *MqttClientv4) Connect() error {
 		return errors.New("Not connected")
 	}
 	return nil
-}
-
-func (self *MqttClientv4) Delete(topic string) {
-	self.Delete(topic)
 }
 
 func (self *MqttClientv4) Publish(topic string, payload []byte, qos uint8, retain bool) error {
@@ -178,7 +170,6 @@ func Connect34(config MqttConfig) (*MqttClientv4, error) {
 
 	if config.Port == 8883 {
 		tlsConfig := tls.Config{}
-		//		tlsConfig.CipherSuites = append(tlsConfig.CipherSuites, uint16(client.Cipher))
 		tlsConfig.CipherSuites = cipher_suite
 		tlsConfig.InsecureSkipVerify = true
 		return_value.opts.SetTLSConfig(&tlsConfig)

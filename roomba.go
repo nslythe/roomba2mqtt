@@ -4,17 +4,23 @@ type CleanMissionStatus struct {
 	Phase string `json:"phase"`
 }
 
-type RoombaRegion struct {
-	RegionId string `json:"region_id"`
-	Type     string `json:"type"`
+type RoombaRegionParams struct {
+	NoAutoPasses bool `json:"noAutoPasses"`
+	TwoPass      bool `json:"twoPass"`
 }
 
-type LastCommand struct {
-	Command   string         `json:"command"`
-	Initiator string         `json:"initiator"`
-	Time      int            `json:"time"`
-	Regions   []RoombaRegion `json:"regions"`
-	PmapId    string         `json:"pmap_id"`
+type RoombaRegion struct {
+	RegionId string             `json:"region_id"`
+	Type     string             `json:"type"`
+	Params   RoombaRegionParams `json:"params"`
+}
+
+type Command struct {
+	Command   string         `json:"command,omitempty"`
+	Initiator string         `json:"initiator,omitempty"`
+	Time      int            `json:"time,omitempty"`
+	Regions   []RoombaRegion `json:"regions,omitempty"`
+	PmapId    string         `json:"pmap_id,omitempty"`
 }
 
 type Bin struct {
@@ -35,7 +41,7 @@ type Reported struct {
 	DetectedPad        *string             `json:"detectedPad,omitempty"`
 	Bin                *Bin                `json:"bin,omitempty"`
 	CleanMissionStatus *CleanMissionStatus `json:"cleanMissionStatus,omitempty"`
-	LastCommand        *LastCommand        `json:"lastCommand,omitempty"`
+	LastCommand        *Command            `json:"lastCommand,omitempty"`
 	Maps               *[]MapMap           `json:"pmaps,omitempty"`
 }
 
